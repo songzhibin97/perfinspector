@@ -1,0 +1,104 @@
+# PerfInspector v0.1 规则配置
+# 支持单类型规则和联合分析规则
+
+rules:
+  - id: "memory_growth_trend"
+    name: "内存持续增长趋势"
+    profile_types: ["heap"]
+    condition: "trends.heap_inuse.slope > 10.0 && trends.heap_inuse.r2 > 0.85 && metricsSeries.length > 3"
+    actions:
+      - type: "report"
+        severity: "high"
+        title: "📈 持续内存增长趋势"
+        evidence_template:
+          内存增长速率: "{{.slope}}/分钟"
+          线性相关度: "{{.r2}} (1.0为完美线性)"
+          时间范围: "{{.duration}}"
+        suggestions:
+          - "可能存在内存泄漏，检查长期运行的对象"
+          - "使用 go tool pprof --alloc_space 分析分配热点"
+
+  - id: "cpu_spike"
+    name: "CPU 使用率突增"
+    profile_types: ["cpu"]
+    condition: "current.cpu_usage > baseline.cpu_usage * 2"
+    actions:
+      - type: "report"
+        severity: "medium"
+        title: "⚡ CPU 使用率突增"
+        suggestions:
+          - "检查是否有新的热点函数"
+          - "使用 go tool pprof -top 查看 CPU 消耗排名"
+
+  - id: "cpu_hotspot"
+    name: "CPU 热点函数分析"
+    profile_types: ["cpu"]
+    condition: "cpu_profile_exists"
+    actions:
+      - type: "report"
+        severity: "medium"
+        title: "🔥 CPU 热点函数分析"
+        evidence_template:
+          分析文件数: "{{.file_count}}"
+        suggestions:
+          - "检查热点函数的算法复杂度，考虑优化"
+          - "使用 go tool pprof -top 查看 CPU 消耗排名"
+          - "使用 go tool pprof -list <函数名> 查看具体代码行"
+          - "考虑使用更高效的数据结构或算法"
+          - "对于字符串拼接，使用 strings.Builder 替代 + 操作"
+          - "对于频繁的内存分配，考虑使用 sync.Pool 复用对象"
+
+  - id: "goroutine_leak"
+    name: "Goroutine 泄漏"
+    profile_types: ["goroutine"]
+    condition: "trends.goroutine_count.slope > 1.0 && trends.goroutine_count.r2 > 0.9"
+    actions:
+      - type: "report"
+        severity: "high"
+        title: "🔄 Goroutine 持续增长"
+        suggestions:
+          - "检查是否有未关闭的 channel"
+          - "检查是否有阻塞的 goroutine"
+          - "使用 runtime.NumGoroutine() 监控 goroutine 数量"
+
+# 联合分析规则 - 跨多种 profile 类型的关联分析
+cross_analysis_rules:
+  - id: "goroutine_memory_leak"
+    name: "Goroutine 导致的内存泄漏"
+    conditions:
+      heap: "increasing && slope > 0"
+      goroutine: "increasing && slope > 0"
+    correlation: "both_increasing"
+    actions:
+      - type: "report"
+        severity: "critical"
+        title: "🚨 Goroutine 泄漏导致内存增长"
+        evidence_template:
+          内存增长速率: "{{.heap_slope}}/分钟"
+          内存趋势相关度: "{{.heap_r2}}"
+          Goroutine增长速率: "{{.goroutine_slope}} 个/分钟"
+          Goroutine趋势相关度: "{{.goroutine_r2}}"
+        suggestions:
+          - "Goroutine 和内存同时增长，高度怀疑 goroutine 泄漏"
+          - "每个泄漏的 goroutine 都会持有栈内存和相关对象"
+          - "使用 pprof goroutine 查看阻塞点和泄漏源"
+          - "检查是否有未关闭的 channel 或无限等待的 select"
+
+  - id: "memory_without_goroutine"
+    name: "非 Goroutine 相关的内存泄漏"
+    conditions:
+      heap: "increasing && slope > 0"
+      goroutine: "slope <= 0"
+    correlation: "time_correlated"
+    actions:
+      - type: "report"
+        severity: "high"
+        title: "💾 独立内存泄漏（非 Goroutine 相关）"
+        evidence_template:
+          内存增长速率: "{{.heap_slope}}/分钟"
+          内存趋势相关度: "{{.heap_r2}}"
+        suggestions:
+          - "内存增长但 Goroutine 数量稳定"
+          - "可能是缓存没有过期策略"
+          - "检查全局变量、sync.Pool、连接池等"
+          - "使用 go tool pprof --inuse_space 分析内存占用"
