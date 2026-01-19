@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/pprof/profile"
@@ -28,8 +29,10 @@ type ProfileMetrics struct {
 	// Goroutine 指标
 	GoroutineCount int64
 
-	// Top 函数
+	// Top 函数 (基于 inuse_space)
 	TopFunctions []FunctionStat
+	// Top 函数 (基于 alloc_space，用于 heap profile)
+	TopAllocFunctions []FunctionStat
 }
 
 // FunctionStat 函数统计
@@ -71,7 +74,9 @@ func ExtractMetrics(p *profile.Profile, profileType string) *ProfileMetrics {
 		metrics.TopFunctions = extractTopFunctions(p, 10, 1) // CPU 时间在 index 1
 	case "heap":
 		metrics.AllocObjects, metrics.AllocSpace, metrics.InuseObjects, metrics.InuseSpace = extractHeapMetrics(p)
-		metrics.TopFunctions = extractTopFunctions(p, 10, 1) // alloc_space 在 index 1
+		// 提取两个维度的 Top 函数
+		metrics.TopFunctions = extractTopFunctions(p, 10, 3)      // inuse_space 在 index 3
+		metrics.TopAllocFunctions = extractTopFunctions(p, 10, 1) // alloc_space 在 index 1
 	case "goroutine":
 		metrics.GoroutineCount = extractGoroutineCount(p)
 		metrics.TopFunctions = extractTopFunctions(p, 10, 0)
@@ -183,6 +188,7 @@ func extractTopFunctions(p *profile.Profile, n int, valueIndex int) []FunctionSt
 				cumMap[funcID] += value
 
 				// Flat: 只有栈顶（第一个位置）计入
+				// 但对于 goroutine profile，我们使用 cum 值来展示所有调用路径
 				if i == 0 {
 					flatMap[funcID] += value
 				}
@@ -192,7 +198,14 @@ func extractTopFunctions(p *profile.Profile, n int, valueIndex int) []FunctionSt
 
 	// 转换为切片并排序
 	var stats []FunctionStat
-	for funcID, flat := range flatMap {
+
+	// 对于 goroutine profile，我们需要过滤掉 runtime 函数，展示业务相关的调用
+	isGoroutineProfile := false
+	if len(p.SampleType) > 0 && p.SampleType[0].Type == "goroutine" {
+		isGoroutineProfile = true
+	}
+
+	for funcID, cum := range cumMap {
 		fn := funcMap[funcID]
 		if fn == nil {
 			continue
@@ -203,7 +216,15 @@ func extractTopFunctions(p *profile.Profile, n int, valueIndex int) []FunctionSt
 			name = "<unknown>"
 		}
 
-		cum := cumMap[funcID]
+		// 对于 goroutine profile，过滤掉纯 runtime 函数
+		if isGoroutineProfile {
+			if strings.HasPrefix(name, "runtime.") ||
+				strings.HasPrefix(name, "runtime/") {
+				continue
+			}
+		}
+
+		flat := flatMap[funcID]
 
 		var flatPct, cumPct float64
 		if totalValue > 0 {
@@ -220,9 +241,9 @@ func extractTopFunctions(p *profile.Profile, n int, valueIndex int) []FunctionSt
 		})
 	}
 
-	// 按 flat 值降序排序
+	// 按 cum 值降序排序（对于 goroutine profile 更有意义）
 	sort.Slice(stats, func(i, j int) bool {
-		return stats[i].Flat > stats[j].Flat
+		return stats[i].Cum > stats[j].Cum
 	})
 
 	// 取 Top N
@@ -249,18 +270,18 @@ func FormatBytes(bytes int64) string {
 	case bytes >= KB:
 		return formatFloat(float64(bytes)/KB) + " KB"
 	default:
-		return formatInt(bytes) + " B"
+		return FormatInt(bytes) + " B"
 	}
 }
 
 func formatFloat(f float64) string {
 	if f >= 100 {
-		return formatInt(int64(f))
+		return FormatInt(int64(f))
 	}
 	return formatFloatPrecision(f, 2)
 }
 
-func formatInt(i int64) string {
+func FormatInt(i int64) string {
 	s := ""
 	for i > 0 {
 		if s != "" {

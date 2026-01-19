@@ -46,6 +46,28 @@ func GenerateTextReportWithContext(groups []analyzer.ProfileGroup, trends map[st
 			}
 		}
 
+		// 对于 heap profile，显示智能洞察
+		if group.Type == "heap" && len(group.Files) > 0 && group.Files[0].Metrics != nil {
+			insights := analyzer.AnalyzeHeapInsights(group.Files[0].Metrics)
+			if len(insights) > 0 {
+				fmt.Println("\n  💡 关键发现:")
+				fmt.Println("  ───────────────────────────────────────────────────────────")
+				for _, insight := range insights {
+					levelIcon := ""
+					switch insight.Level {
+					case "critical":
+						levelIcon = "🔴"
+					case "warning":
+						levelIcon = "🟡"
+					case "info":
+						levelIcon = "🔵"
+					}
+					fmt.Printf("\n  %s %s\n", levelIcon, insight.Title)
+					fmt.Printf("     %s\n", insight.Description)
+				}
+			}
+		}
+
 		// 显示时间范围
 		if len(group.Files) > 1 {
 			first := group.Files[0].Time.UTC()
@@ -273,15 +295,44 @@ func printMetrics(m *analyzer.ProfileMetrics, profileType string) {
 		fmt.Println("     └─")
 
 	case "heap":
-		fmt.Printf("     ├─ 已分配: %s (%d 对象)\n", analyzer.FormatBytes(m.AllocSpace), m.AllocObjects)
-		fmt.Printf("     ├─ 使用中: %s (%d 对象)\n", analyzer.FormatBytes(m.InuseSpace), m.InuseObjects)
+		fmt.Printf("     ├─ 已分配: %s (%s 对象)\n", analyzer.FormatBytes(m.AllocSpace), analyzer.FormatInt(m.AllocObjects))
+		fmt.Printf("     ├─ 使用中: %s (%s 对象)\n", analyzer.FormatBytes(m.InuseSpace), analyzer.FormatInt(m.InuseObjects))
+
+		// 计算内存回收率
+		if m.AllocSpace > 0 {
+			gcRate := float64(m.AllocSpace-m.InuseSpace) / float64(m.AllocSpace) * 100
+			fmt.Printf("     ├─ GC回收率: %.1f%%\n", gcRate)
+		}
+
 		if len(m.TopFunctions) > 0 {
-			fmt.Println("     ├─ Top 内存分配点:")
-			for i, fn := range m.TopFunctions {
-				if i >= 5 {
+			fmt.Println("     ├─ Top 当前内存占用 (inuse_space):")
+			count := 0
+			for _, fn := range m.TopFunctions {
+				if count >= 5 {
 					break
 				}
-				fmt.Printf("     │  %d. %s (%.1f%%)\n", i+1, truncateName(fn.Name, 50), fn.FlatPct)
+				// 跳过 flat 为 0 的函数（它们只在调用栈中间）
+				if fn.Flat == 0 {
+					continue
+				}
+				count++
+				fmt.Printf("     │  %d. %s (%.1f%%, %s)\n", count, truncateName(fn.Name, 45), fn.FlatPct, analyzer.FormatBytes(fn.Flat))
+			}
+		}
+
+		if len(m.TopAllocFunctions) > 0 {
+			fmt.Println("     ├─ Top 累计内存分配 (alloc_space):")
+			count := 0
+			for _, fn := range m.TopAllocFunctions {
+				if count >= 5 {
+					break
+				}
+				// 跳过 flat 为 0 的函数
+				if fn.Flat == 0 {
+					continue
+				}
+				count++
+				fmt.Printf("     │  %d. %s (%.1f%%, %s)\n", count, truncateName(fn.Name, 45), fn.FlatPct, analyzer.FormatBytes(fn.Flat))
 			}
 		}
 		fmt.Println("     └─")
@@ -289,12 +340,12 @@ func printMetrics(m *analyzer.ProfileMetrics, profileType string) {
 	case "goroutine":
 		fmt.Printf("     ├─ Goroutine数: %d\n", m.GoroutineCount)
 		if len(m.TopFunctions) > 0 {
-			fmt.Println("     ├─ Top 阻塞点:")
+			fmt.Println("     ├─ Top 调用路径:")
 			for i, fn := range m.TopFunctions {
 				if i >= 5 {
 					break
 				}
-				fmt.Printf("     │  %d. %s (%d)\n", i+1, truncateName(fn.Name, 50), fn.Flat)
+				fmt.Printf("     │  %d. %s (%d, %.1f%%)\n", i+1, truncateName(fn.Name, 50), fn.Cum, fn.CumPct)
 			}
 		}
 		fmt.Println("     └─")

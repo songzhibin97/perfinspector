@@ -31,11 +31,12 @@ type HTMLGroupData struct {
 	Duration  string
 	HasTrends bool
 	Trends    *analyzer.GroupTrends
-	ChartData []HTMLChartPoint // 图表数据点
-	ChartType string           // "heap" 或 "goroutine"
-	ChartUnit string           // 单位显示
-	ChartMax  float64          // Y轴最大值
-	ChartMin  float64          // Y轴最小值
+	ChartData []HTMLChartPoint       // 图表数据点
+	ChartType string                 // "heap" 或 "goroutine"
+	ChartUnit string                 // 单位显示
+	ChartMax  float64                // Y轴最大值
+	ChartMin  float64                // Y轴最小值
+	Insights  []analyzer.HeapInsight // 智能洞察
 }
 
 // HTMLChartPoint 图表数据点
@@ -254,6 +255,74 @@ const htmlTemplate = `<!DOCTYPE html>
             font-size: 0.75em;
             font-weight: 600;
         }
+        
+        /* Insights Section */
+        .insights-section {
+            margin: 20px 0;
+        }
+        .insights-section h3 {
+            font-size: 1.2em;
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .insight-card {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 4px solid #667eea;
+        }
+        .insight-card.critical {
+            border-left-color: #e74c3c;
+            background: #fff5f5;
+        }
+        .insight-card.warning {
+            border-left-color: #f39c12;
+            background: #fffbf0;
+        }
+        .insight-card.info {
+            border-left-color: #3498db;
+            background: #f0f8ff;
+        }
+        .insight-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .insight-icon {
+            font-size: 1.2em;
+            margin-right: 10px;
+        }
+        .insight-title {
+            font-weight: 600;
+            font-size: 1em;
+            color: #333;
+        }
+        .insight-description {
+            color: #666;
+            margin-bottom: 10px;
+            line-height: 1.5;
+        }
+        .insight-suggestions {
+            background: rgba(255, 255, 255, 0.7);
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .insight-suggestions strong {
+            color: #333;
+            display: block;
+            margin-bottom: 5px;
+        }
+        .insight-suggestions ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+        .insight-suggestions li {
+            color: #555;
+            margin: 5px 0;
+            line-height: 1.4;
+        }
+        
         .stats {
             display: flex;
             gap: 15px;
@@ -856,6 +925,12 @@ const htmlTemplate = `<!DOCTYPE html>
                         <div class="metric-label">使用中对象</div>
                         <div class="metric-value">{{$file.Metrics.InuseObjects}}</div>
                     </div>
+                    {{if gt $file.Metrics.AllocSpace 0}}
+                    <div class="metric-card">
+                        <div class="metric-label">GC 回收率</div>
+                        <div class="metric-value highlight">{{printf "%.1f" (mul (div (sub $file.Metrics.AllocSpace $file.Metrics.InuseSpace) $file.Metrics.AllocSpace) 100)}}%</div>
+                    </div>
+                    {{end}}
                     {{else if eq $file.ProfileType "goroutine"}}
                     <div class="metric-card">
                         <div class="metric-label">Goroutine 数量</div>
@@ -866,18 +941,60 @@ const htmlTemplate = `<!DOCTYPE html>
 
                 {{if $file.Metrics.TopFunctions}}
                 <div class="top-functions">
-                    <h4>Top 热点{{if eq $file.ProfileType "cpu"}}函数{{else if eq $file.ProfileType "heap"}}内存分配点{{else if eq $file.ProfileType "goroutine"}}阻塞点{{else}}函数{{end}}</h4>
+                    <h4>Top {{if eq $file.ProfileType "heap"}}当前内存占用 (inuse_space){{else if eq $file.ProfileType "goroutine"}}调用路径{{else}}热点函数{{end}}</h4>
                     {{range $i, $fn := $file.Metrics.TopFunctions}}
                     {{if lt $i 5}}
+                    {{if or (ne $file.ProfileType "heap") (gt $fn.Flat 0)}}
                     <div class="func-item">
                         <span class="func-rank {{if eq $i 0}}top1{{else if eq $i 1}}top2{{else if eq $i 2}}top3{{end}}">{{add $i 1}}</span>
                         <span class="func-name" title="{{$fn.Name}}">{{$fn.Name}}</span>
+                        {{if eq $file.ProfileType "heap"}}
+                        <span class="func-pct">{{printf "%.1f" $fn.FlatPct}}% ({{formatBytes $fn.Flat}})</span>
+                        {{else if eq $file.ProfileType "goroutine"}}
+                        <span class="func-pct">{{printf "%.1f" $fn.CumPct}}%</span>
+                        {{else}}
                         <span class="func-pct">{{printf "%.1f" $fn.FlatPct}}%</span>
+                        {{end}}
                     </div>
+                    {{end}}
                     {{end}}
                     {{end}}
                 </div>
                 {{end}}
+                
+                {{if and (eq $file.ProfileType "heap") $file.Metrics.TopAllocFunctions}}
+                <div class="top-functions">
+                    <h4>Top 累计内存分配 (alloc_space)</h4>
+                    {{range $i, $fn := $file.Metrics.TopAllocFunctions}}
+                    {{if lt $i 5}}
+                    {{if gt $fn.Flat 0}}
+                    <div class="func-item">
+                        <span class="func-rank {{if eq $i 0}}top1{{else if eq $i 1}}top2{{else if eq $i 2}}top3{{end}}">{{add $i 1}}</span>
+                        <span class="func-name" title="{{$fn.Name}}">{{$fn.Name}}</span>
+                        <span class="func-pct">{{printf "%.1f" $fn.FlatPct}}% ({{formatBytes $fn.Flat}})</span>
+                    </div>
+                    {{end}}
+                    {{end}}
+                    {{end}}
+                </div>
+                {{end}}
+                {{end}}
+            </div>
+            {{end}}
+            
+            {{if .Insights}}
+            <div class="insights-section">
+                <h3>💡 关键发现</h3>
+                {{range .Insights}}
+                <div class="insight-card {{.Level}}">
+                    <div class="insight-header">
+                        <span class="insight-icon">
+                            {{if eq .Level "critical"}}🔴{{else if eq .Level "warning"}}🟡{{else}}🔵{{end}}
+                        </span>
+                        <span class="insight-title">{{.Title}}</span>
+                    </div>
+                    <div class="insight-description">{{.Description}}</div>
+                </div>
                 {{end}}
             </div>
             {{end}}
@@ -1125,15 +1242,34 @@ func GenerateHTMLReportWithContext(groups []analyzer.ProfileGroup, trends map[st
 			}
 		}
 
+		// 对于 heap profile，生成智能洞察
+		if group.Type == "heap" && len(group.Files) > 0 && group.Files[0].Metrics != nil {
+			htmlGroup.Insights = analyzer.AnalyzeHeapInsights(group.Files[0].Metrics)
+		}
+
 		data.Groups = append(data.Groups, htmlGroup)
 	}
 
 	funcMap := template.FuncMap{
 		"add": func(a, b int) int { return a + b },
-		"sub": func(a, b int) int { return a - b },
+		"sub": func(a, b interface{}) interface{} {
+			switch va := a.(type) {
+			case int:
+				if vb, ok := b.(int); ok {
+					return va - vb
+				}
+			case int64:
+				if vb, ok := b.(int64); ok {
+					return va - vb
+				}
+			}
+			return 0
+		},
 		"mul": func(a interface{}, b float64) float64 {
 			switch v := a.(type) {
 			case int:
+				return float64(v) * b
+			case int64:
 				return float64(v) * b
 			case float64:
 				return v * b
@@ -1141,11 +1277,28 @@ func GenerateHTMLReportWithContext(groups []analyzer.ProfileGroup, trends map[st
 				return 0
 			}
 		},
-		"div": func(a, b int) int {
-			if b == 0 {
+		"div": func(a, b interface{}) float64 {
+			var fa, fb float64
+			switch v := a.(type) {
+			case int:
+				fa = float64(v)
+			case int64:
+				fa = float64(v)
+			case float64:
+				fa = v
+			}
+			switch v := b.(type) {
+			case int:
+				fb = float64(v)
+			case int64:
+				fb = float64(v)
+			case float64:
+				fb = v
+			}
+			if fb == 0 {
 				return 0
 			}
-			return a / b
+			return fa / fb
 		},
 		"formatBytes": analyzer.FormatBytes,
 		"escapeJS":    escapeJSString,
