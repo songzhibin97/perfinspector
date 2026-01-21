@@ -146,16 +146,61 @@ func GenerateExplanation(finding rules.Finding, hotPaths []HotPath) string {
 	// 添加热点路径相关的解释
 	if len(hotPaths) > 0 {
 		topPath := hotPaths[0]
+
+		// 检查是否有业务代码
 		if topPath.RootCauseIndex >= 0 && topPath.RootCauseIndex < len(topPath.Chain.Frames) {
 			rootCause := topPath.Chain.Frames[topPath.RootCauseIndex]
-			sb.WriteString(fmt.Sprintf(" 主要问题出现在 %s 函数（%s）。",
+			sb.WriteString(fmt.Sprintf(" 主要问题出现在业务代码 %s 函数（%s）",
 				rootCause.ShortName, rootCause.Location()))
+
+			// 分析业务代码调用了什么
+			if topPath.RootCauseIndex < len(topPath.Chain.Frames)-1 {
+				// 找到业务代码之后的第一个非业务代码帧
+				for i := topPath.RootCauseIndex + 1; i < len(topPath.Chain.Frames); i++ {
+					frame := topPath.Chain.Frames[i]
+					if frame.Category != CategoryBusiness {
+						sb.WriteString(fmt.Sprintf("，该函数调用了 %s (%s)",
+							getCategoryDescription(frame.Category), frame.ShortName))
+						break
+					}
+				}
+			}
+			sb.WriteString("。")
 		} else if !topPath.Chain.HasBusinessCode() {
-			sb.WriteString(" 该热点路径中没有业务代码，可能是运行时/GC 问题或间接调用。")
+			// 没有业务代码，但可能是业务代码间接触发的
+			sb.WriteString(" 该热点路径中没有直接的业务代码，")
+
+			// 分析调用链的组成
+			breakdown := topPath.Chain.CategoryBreakdown
+			if breakdown[CategoryRuntime] > 0 && breakdown[CategoryRuntime] == len(topPath.Chain.Frames) {
+				sb.WriteString("全部是 Go 运行时代码，通常是 GC 或内存管理开销。")
+			} else if breakdown[CategoryThirdParty] > 0 {
+				sb.WriteString("主要是第三方库调用，可能是业务代码通过第三方库间接触发的。")
+			} else if breakdown[CategoryStdlib] > 0 {
+				sb.WriteString("主要是标准库调用，可能是业务代码通过标准库间接触发的。")
+			} else {
+				sb.WriteString("可能是业务代码间接触发的运行时开销。")
+			}
 		}
 	}
 
 	return sb.String()
+}
+
+// getCategoryDescription 获取代码类别的描述
+func getCategoryDescription(category CodeCategory) string {
+	switch category {
+	case CategoryRuntime:
+		return "Go 运行时"
+	case CategoryStdlib:
+		return "标准库"
+	case CategoryThirdParty:
+		return "第三方库"
+	case CategoryBusiness:
+		return "业务代码"
+	default:
+		return "未知代码"
+	}
 }
 
 // generateBasicExplanation 生成基础问题解释

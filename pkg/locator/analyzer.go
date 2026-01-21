@@ -34,8 +34,26 @@ func (a *PathAnalyzer) AnalyzeHotPaths(p *profile.Profile, profileType string) [
 		return nil
 	}
 
+	// 根据 profile 类型选择合适的值索引
+	// 对于 CPU profile，优先使用 cpu/nanoseconds 类型的值
+	valueIndex := 0
+	useCumValue := false
+
+	// 检查 SampleType 来选择最佳值索引
+	if len(p.SampleType) > 1 {
+		for i, st := range p.SampleType {
+			if st.Type == "cpu" || st.Unit == "nanoseconds" {
+				valueIndex = i
+				useCumValue = true
+				break
+			}
+		}
+	} else if profileType == "cpu" && len(p.Sample) > 0 && len(p.Sample[0].Value) > 1 {
+		valueIndex = 1 // 使用 cum 值
+		useCumValue = true
+	}
+
 	// 计算总值（用于百分比计算）
-	valueIndex := 0 // 默认使用第一个 value
 	totalValue := int64(0)
 	for _, sample := range p.Sample {
 		if len(sample.Value) > valueIndex {
@@ -50,7 +68,12 @@ func (a *PathAnalyzer) AnalyzeHotPaths(p *profile.Profile, profileType string) [
 	// 提取所有调用链
 	chains := make([]CallChain, 0, len(p.Sample))
 	for _, sample := range p.Sample {
-		chain := a.extractor.ExtractCallChain(sample, valueIndex, totalValue)
+		var chain CallChain
+		if useCumValue {
+			chain = a.extractor.ExtractCallChainWithCumValue(sample, totalValue)
+		} else {
+			chain = a.extractor.ExtractCallChain(sample, valueIndex, totalValue)
+		}
 		if len(chain.Frames) > 0 {
 			chains = append(chains, chain)
 		}
@@ -112,6 +135,24 @@ func (a *PathAnalyzer) AnalyzeMultipleProfiles(profiles []*profile.Profile, prof
 		return a.AnalyzeHotPaths(profiles[0], profileType)
 	}
 
+	// 根据 profile 类型选择合适的值索引
+	valueIndex := 0
+	useCumValue := false
+
+	// 检查第一个 profile 的 SampleType 来选择最佳值索引
+	if len(profiles) > 0 && len(profiles[0].SampleType) > 1 {
+		for i, st := range profiles[0].SampleType {
+			if st.Type == "cpu" || st.Unit == "nanoseconds" {
+				valueIndex = i
+				useCumValue = true
+				break
+			}
+		}
+	} else if profileType == "cpu" && len(profiles) > 0 && len(profiles[0].Sample) > 0 && len(profiles[0].Sample[0].Value) > 1 {
+		valueIndex = 1 // 使用 cum 值
+		useCumValue = true
+	}
+
 	// 收集所有 profile 的热点路径
 	allChains := make([]CallChain, 0)
 	totalValueAcrossProfiles := int64(0)
@@ -121,7 +162,6 @@ func (a *PathAnalyzer) AnalyzeMultipleProfiles(profiles []*profile.Profile, prof
 			continue
 		}
 
-		valueIndex := 0
 		profileTotalValue := int64(0)
 		for _, sample := range p.Sample {
 			if len(sample.Value) > valueIndex {
@@ -137,7 +177,12 @@ func (a *PathAnalyzer) AnalyzeMultipleProfiles(profiles []*profile.Profile, prof
 
 		// 提取该 profile 的所有调用链
 		for _, sample := range p.Sample {
-			chain := a.extractor.ExtractCallChain(sample, valueIndex, profileTotalValue)
+			var chain CallChain
+			if useCumValue {
+				chain = a.extractor.ExtractCallChainWithCumValue(sample, profileTotalValue)
+			} else {
+				chain = a.extractor.ExtractCallChain(sample, valueIndex, profileTotalValue)
+			}
 			if len(chain.Frames) > 0 {
 				allChains = append(allChains, chain)
 			}
@@ -209,7 +254,8 @@ func (a *PathAnalyzer) AggregateCallChains(chains []CallChain) []CallChain {
 
 	for i := range chains {
 		chain := &chains[i]
-		key := generateCallChainKey(chain.Frames)
+		// 使用智能聚合策略：优先按业务代码聚合
+		key := generateSmartCallChainKey(chain.Frames)
 
 		if existing, ok := aggregated[key]; ok {
 			// 聚合：累加值和样本数
@@ -257,6 +303,51 @@ func generateCallChainKey(frames []StackFrame) string {
 			key += "|"
 		}
 		key += frame.FunctionName
+	}
+	return key
+}
+
+// generateSmartCallChainKey 生成智能调用链标识
+// 策略：如果有业务代码，按业务代码聚合；否则按完整调用栈聚合
+func generateSmartCallChainKey(frames []StackFrame) string {
+	if len(frames) == 0 {
+		return ""
+	}
+
+	// 查找业务代码帧
+	businessFrames := make([]string, 0)
+	for _, frame := range frames {
+		if frame.Category == CategoryBusiness {
+			businessFrames = append(businessFrames, frame.FunctionName)
+		}
+	}
+
+	// 如果有业务代码，只使用业务代码部分作为 key
+	// 这样可以将相同业务代码但底层调用不同的路径聚合在一起
+	if len(businessFrames) > 0 {
+		key := "business:"
+		for i, fn := range businessFrames {
+			if i > 0 {
+				key += "|"
+			}
+			key += fn
+		}
+		return key
+	}
+
+	// 如果没有业务代码，使用完整调用栈
+	// 但只使用前 5 帧，避免过度分散
+	maxFrames := 5
+	if len(frames) < maxFrames {
+		maxFrames = len(frames)
+	}
+
+	key := "system:"
+	for i := 0; i < maxFrames; i++ {
+		if i > 0 {
+			key += "|"
+		}
+		key += frames[i].FunctionName
 	}
 	return key
 }

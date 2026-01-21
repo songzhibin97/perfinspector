@@ -188,6 +188,21 @@ func (e *Extractor) ExtractCallChain(sample *profile.Sample, valueIndex int, tot
 	return chain
 }
 
+// ExtractCallChainWithCumValue 从 Sample 提取完整调用链，使用累计值（cum）
+// 对于 CPU profile，cum 值更能反映业务代码的影响
+func (e *Extractor) ExtractCallChainWithCumValue(sample *profile.Sample, totalValue int64) CallChain {
+	// CPU profile 通常有两个值：[flat, cum]
+	// 我们使用 cum 值（索引 1）来识别业务代码的影响
+	cumIndex := 1
+	if len(sample.Value) <= cumIndex {
+		// 如果没有 cum 值，回退到第一个值
+		cumIndex = 0
+	}
+
+	chain := e.ExtractCallChain(sample, cumIndex, totalValue)
+	return chain
+}
+
 // ExtractCallChainWithValues 从 Sample 提取完整调用链，并设置每帧的 flat/cum 值
 // 这个方法用于需要显示每帧消耗值的场景
 func (e *Extractor) ExtractCallChainWithValues(sample *profile.Sample, valueIndex int, totalValue int64, flatValues, cumValues map[uint64]int64) CallChain {
